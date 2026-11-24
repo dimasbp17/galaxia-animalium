@@ -1,26 +1,34 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ArrowUpRight,
-  Camera,
   ChevronRight,
   Eye,
   ImageOff,
+  MapPin,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import AnimalCard, { AnimalCardSkeleton } from "@/components/AnimalCard";
-import { useAsync } from "@/hooks/useAsync";
+import ConservationBadge from "@/components/ConservationBadge";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { CATEGORIES } from "@/lib/categories";
-import { cn } from "@/lib/utils";
+import { getGlobalStatus, getIucnCategory, getPlaceStatus } from "@/lib/conservation";
 import {
-  getAnimalById,
-  photoSize,
-  searchAnimals,
-} from "@/services/inaturalist";
-import { findWikiSummary } from "@/services/wikipedia";
+  animalQuery,
+  animalsQuery,
+  observationSummaryQuery,
+  wikiQuery,
+} from "@/lib/queries";
+import { INDONESIA } from "@/lib/regions";
+import { cn } from "@/lib/utils";
+import { photoSize } from "@/services/inaturalist";
 import type { Taxon } from "@/types/animal";
+
+// Leaflet cukup besar — hanya diunduh saat halaman detail dibuka
+const DistributionMap = lazy(() => import("@/components/DistributionMap"));
 
 const RANK_LABEL: Record<string, string> = {
   kingdom: "Kerajaan",
@@ -32,32 +40,22 @@ const RANK_LABEL: Record<string, string> = {
 };
 
 const AnimalDetailPage = () => {
-  const { id } = useParams();
+  const id = Number(useParams().id);
+  const { data: taxon, isPending, isError, error } = useQuery(animalQuery(id));
 
-  const { data, loading, error } = useAsync(async () => {
-    const taxon = await getAnimalById(Number(id));
-    if (!taxon) return null;
-    // Kalau Wikipedia gagal, halaman tetap tampil tanpa deskripsi.
-    const wiki = await findWikiSummary([
-      taxon.preferred_common_name,
-      taxon.name,
-    ]).catch(() => null);
-    return { taxon, wiki };
-  }, [id]);
+  const name = taxon ? (taxon.preferred_common_name ?? taxon.name) : undefined;
+  useDocumentTitle(name ? capitalize(name) : undefined);
 
-  const title = data?.taxon.preferred_common_name ?? data?.taxon.name;
-  useDocumentTitle(title ? capitalize(title) : undefined);
+  if (isPending) return <DetailSkeleton />;
 
-  if (loading) return <DetailSkeleton />;
-
-  if (error || !data) {
+  if (isError || !taxon) {
     return (
       <div className="container-page flex flex-col items-center py-24 text-center">
         <h1 className="text-3xl font-bold text-forest">
-          {error ? "Gagal memuat data" : "Hewan tidak ditemukan"}
+          {isError ? "Gagal memuat data" : "Hewan tidak ditemukan"}
         </h1>
         <p className="mt-2 text-muted-foreground">
-          {error ?? "Spesies yang kamu cari tidak tersedia."}
+          {isError ? error.message : "Spesies yang kamu cari tidak tersedia."}
         </p>
         <Button asChild className="mt-6">
           <Link to="/gallery">Kembali ke Gallery</Link>
@@ -66,15 +64,24 @@ const AnimalDetailPage = () => {
     );
   }
 
-  const { taxon, wiki } = data;
+  // `key` → state galeri foto di-reset saat pindah ke hewan lain
+  return <AnimalDetail key={taxon.id} taxon={taxon} />;
+};
+
+const AnimalDetail = ({ taxon }: { taxon: Taxon }) => {
   const name = taxon.preferred_common_name ?? taxon.name;
-  const classification = (taxon.ancestors ?? []).filter(
-    (a) => a.rank in RANK_LABEL
+  const { data: wiki, isPending: wikiPending } = useQuery(
+    wikiQuery([taxon.preferred_common_name, taxon.name])
   );
+  const { data: summary } = useQuery(observationSummaryQuery(taxon.id));
+
+  const classification = (taxon.ancestors ?? []).filter((a) => a.rank in RANK_LABEL);
   const category = CATEGORIES.find((c) =>
     (taxon.ancestors ?? []).some((a) => a.id === c.taxonId)
   );
   const family = classification.find((a) => a.rank === "family");
+  const globalStatus = getGlobalStatus(taxon);
+  const indonesiaStatus = getPlaceStatus(taxon, INDONESIA.placeId);
 
   return (
     <>
@@ -86,10 +93,7 @@ const AnimalDetailPage = () => {
           {category && (
             <>
               <ChevronRight className="size-4" />
-              <Link
-                to={`/gallery?kategori=${category.slug}`}
-                className="hover:text-foreground"
-              >
+              <Link to={`/gallery?kategori=${category.slug}`} className="hover:text-foreground">
                 {category.label}
               </Link>
             </>
@@ -103,42 +107,55 @@ const AnimalDetailPage = () => {
         <PhotoGallery taxon={taxon} />
 
         <div className="lg:pt-2">
-          {category && (
-            <Link
-              to={`/gallery?kategori=${category.slug}`}
-              className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-moss"
-            >
-              <category.icon className="size-3.5" />
-              {category.label}
-            </Link>
-          )}
-          <h1 className="mt-4 text-4xl font-bold text-forest capitalize md:text-5xl">
-            {name}
-          </h1>
-          <p className="mt-2 text-xl text-muted-foreground italic">
-            {taxon.name}
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {category && (
+              <Link
+                to={`/gallery?kategori=${category.slug}`}
+                className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-moss"
+              >
+                <category.icon className="size-3.5" />
+                {category.label}
+              </Link>
+            )}
+            <ConservationBadge status={globalStatus} />
+            {!!summary?.indonesiaCount && (
+              <Link
+                to="/gallery?wilayah=indonesia"
+                className="inline-flex items-center gap-1.5 rounded-full bg-forest px-3 py-1 text-xs font-semibold text-sand"
+              >
+                <MapPin className="size-3.5" />
+                Tercatat di Indonesia
+              </Link>
+            )}
+          </div>
+
+          <h1 className="mt-4 text-4xl font-bold text-forest capitalize md:text-5xl">{name}</h1>
+          <p className="mt-2 text-xl text-muted-foreground italic">{taxon.name}</p>
 
           <div className="mt-6 grid grid-cols-2 gap-3">
             <Stat
               icon={Eye}
               value={taxon.observations_count.toLocaleString("id-ID")}
-              label="observasi"
+              label="observasi di dunia"
             />
             <Stat
-              icon={Camera}
-              value={String(taxon.taxon_photos?.length ?? 0)}
-              label="foto pilihan"
+              icon={MapPin}
+              value={summary ? summary.indonesiaCount.toLocaleString("id-ID") : "…"}
+              label="observasi di Indonesia"
             />
           </div>
 
           <div className="mt-8">
             <h2 className="text-xl font-bold text-forest">Tentang hewan ini</h2>
-            {wiki ? (
+            {wikiPending ? (
+              <div className="mt-3 space-y-2">
+                <div className="h-4 animate-pulse rounded bg-muted" />
+                <div className="h-4 animate-pulse rounded bg-muted" />
+                <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+              </div>
+            ) : wiki ? (
               <>
-                <p className="mt-3 leading-relaxed text-foreground/85">
-                  {wiki.extract}
-                </p>
+                <p className="mt-3 leading-relaxed text-foreground/85">{wiki.extract}</p>
                 <a
                   href={wiki.content_urls.desktop.page}
                   target="_blank"
@@ -151,8 +168,7 @@ const AnimalDetailPage = () => {
               </>
             ) : (
               <p className="mt-3 text-muted-foreground">
-                Deskripsi Wikipedia berbahasa Indonesia belum tersedia untuk
-                spesies ini.
+                Deskripsi Wikipedia berbahasa Indonesia belum tersedia untuk spesies ini.
               </p>
             )}
           </div>
@@ -160,7 +176,7 @@ const AnimalDetailPage = () => {
           {classification.length > 0 && (
             <div className="mt-8 rounded-2xl bg-card p-5 ring-1 ring-border">
               <h2 className="text-xl font-bold text-forest">Klasifikasi</h2>
-              <ol className="mt-4 space-y-0">
+              <ol className="mt-4">
                 {classification.map((a, i) => (
                   <li key={a.id} className="relative flex gap-4 pb-3 last:pb-0">
                     {i < classification.length - 1 && (
@@ -168,9 +184,7 @@ const AnimalDetailPage = () => {
                     )}
                     <span className="relative mt-1.5 size-[11px] shrink-0 rounded-full border-2 border-moss bg-card" />
                     <div className="flex flex-1 flex-wrap items-baseline justify-between gap-x-3">
-                      <span className="text-sm text-muted-foreground">
-                        {RANK_LABEL[a.rank]}
-                      </span>
+                      <span className="text-sm text-muted-foreground">{RANK_LABEL[a.rank]}</span>
                       <span className="text-sm font-medium">
                         {a.name}
                         {a.preferred_common_name && (
@@ -188,14 +202,33 @@ const AnimalDetailPage = () => {
           )}
 
           <Button asChild variant="outline" className="mt-6">
-            <a
-              href={`https://www.inaturalist.org/taxa/${taxon.id}`}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <a href={`https://www.inaturalist.org/taxa/${taxon.id}`} target="_blank" rel="noreferrer">
               Lihat di iNaturalist <ArrowUpRight />
             </a>
           </Button>
+        </div>
+      </section>
+
+      {/* ---------- Status konservasi ---------- */}
+      <ConservationSection globalStatus={globalStatus} indonesiaStatus={indonesiaStatus} />
+
+      {/* ---------- Peta sebaran ---------- */}
+      <section className="container-page mt-20">
+        <p className="text-sm font-semibold tracking-wider text-clay uppercase">Sebaran</p>
+        <h2 className="mt-2 text-3xl font-bold text-forest">Di mana hewan ini ditemukan?</h2>
+        <p className="mt-2 max-w-2xl text-muted-foreground">
+          Setiap kotak menunjukkan area tempat {name} pernah diamati di alam liar
+          (bukan di kebun binatang). Perbesar peta untuk
+          melihat titik observasi satu per satu.
+        </p>
+        <div className="mt-8">
+          {summary ? (
+            <Suspense fallback={<MapSkeleton />}>
+              <DistributionMap taxonId={taxon.id} bounds={summary.bounds} />
+            </Suspense>
+          ) : (
+            <MapSkeleton />
+          )}
         </div>
       </section>
 
@@ -207,6 +240,97 @@ const AnimalDetailPage = () => {
 };
 
 /* ---------------- Sub-komponen ---------------- */
+
+const ConservationSection = ({
+  globalStatus,
+  indonesiaStatus,
+}: {
+  globalStatus: ReturnType<typeof getGlobalStatus>;
+  indonesiaStatus: ReturnType<typeof getPlaceStatus>;
+}) => {
+  const global = getIucnCategory(globalStatus);
+  if (!global && !indonesiaStatus) return null;
+
+  return (
+    <section className="container-page mt-20">
+      <div className="rounded-3xl bg-card p-7 ring-1 ring-border md:p-10">
+        <div className="flex items-center gap-3">
+          <span className="flex size-11 items-center justify-center rounded-2xl bg-secondary text-moss">
+            <ShieldAlert className="size-5" />
+          </span>
+          <h2 className="text-2xl font-bold text-forest">Status konservasi</h2>
+        </div>
+
+        {global && (
+          <>
+            <IucnScale activeCode={global.code} />
+            <p className="mt-4 text-sm text-muted-foreground">
+              Menurut <strong className="text-foreground">Daftar Merah IUCN</strong>, spesies ini
+              berstatus <strong className="text-foreground">{global.label}</strong> ({global.code}).
+            </p>
+          </>
+        )}
+
+        {indonesiaStatus && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Status di Indonesia
+            {indonesiaStatus.authority && <> menurut {indonesiaStatus.authority}</>}:{" "}
+            <strong className="text-foreground">
+              {getIucnCategory(indonesiaStatus)?.label ??
+                indonesiaStatus.status_name ??
+                indonesiaStatus.status}
+            </strong>
+          </p>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const IUCN_SCALE = [
+  { code: "LC", color: "bg-emerald-500" },
+  { code: "NT", color: "bg-lime-500" },
+  { code: "VU", color: "bg-amber-500" },
+  { code: "EN", color: "bg-orange-500" },
+  { code: "CR", color: "bg-red-600" },
+  { code: "EW", color: "bg-purple-700" },
+  { code: "EX", color: "bg-stone-900" },
+];
+
+/** Skala IUCN dari Risiko Rendah sampai Punah, dengan status aktif disorot. */
+const IucnScale = ({ activeCode }: { activeCode: string }) => (
+  <div className="mt-6 overflow-x-auto">
+    <div className="flex min-w-[420px] gap-1.5">
+      {IUCN_SCALE.map((s) => {
+        const active = s.code === activeCode;
+        return (
+          <div key={s.code} className="flex-1 text-center">
+            <div
+              className={cn(
+                "h-2.5 rounded-full transition",
+                s.color,
+                active ? "opacity-100" : "opacity-20"
+              )}
+            />
+            <p
+              className={cn(
+                "mt-2 text-xs",
+                active ? "font-bold text-foreground" : "text-muted-foreground"
+              )}
+            >
+              {s.code}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+    {activeCode === "DD" && (
+      <p className="mt-2 text-xs text-muted-foreground">
+        Kurang Data (DD) — belum cukup informasi untuk menilai risikonya.
+      </p>
+    )}
+  </div>
+);
 
 const PhotoGallery = ({ taxon }: { taxon: Taxon }) => {
   const photos = (taxon.taxon_photos ?? []).map((tp) => tp.photo).slice(0, 6);
@@ -242,18 +366,11 @@ const PhotoGallery = ({ taxon }: { taxon: Taxon }) => {
               onClick={() => setActive(i)}
               className={cn(
                 "overflow-hidden rounded-xl ring-2 transition",
-                i === active
-                  ? "ring-moss"
-                  : "opacity-70 ring-transparent hover:opacity-100"
+                i === active ? "ring-moss" : "opacity-70 ring-transparent hover:opacity-100"
               )}
               aria-label={`Foto ${i + 1}`}
             >
-              <img
-                src={p.square_url}
-                alt=""
-                loading="lazy"
-                className="aspect-square w-full object-cover"
-              />
+              <img src={p.square_url} alt="" loading="lazy" className="aspect-square w-full object-cover" />
             </button>
           ))}
         </div>
@@ -271,26 +388,17 @@ const RelatedAnimals = ({
   familyName: string;
   excludeId: number;
 }) => {
-  const { data, loading } = useAsync(
-    () => searchAnimals({ taxonId: familyId, perPage: 5 }),
-    [familyId]
-  );
-  const related = (data?.results ?? [])
-    .filter((t) => t.id !== excludeId)
-    .slice(0, 4);
+  const { data, isPending } = useQuery(animalsQuery({ taxonId: familyId }, 5));
+  const related = (data?.results ?? []).filter((t) => t.id !== excludeId).slice(0, 4);
 
-  if (!loading && related.length === 0) return null;
+  if (!isPending && related.length === 0) return null;
 
   return (
     <section className="container-page mt-20">
-      <p className="text-sm font-semibold tracking-wider text-clay uppercase">
-        Satu keluarga
-      </p>
-      <h2 className="mt-2 text-3xl font-bold text-forest">
-        Kerabat dari famili {familyName}
-      </h2>
+      <p className="text-sm font-semibold tracking-wider text-clay uppercase">Satu keluarga</p>
+      <h2 className="mt-2 text-3xl font-bold text-forest">Kerabat dari famili {familyName}</h2>
       <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-4">
-        {loading
+        {isPending
           ? Array.from({ length: 4 }).map((_, i) => <AnimalCardSkeleton key={i} />)
           : related.map((t) => <AnimalCard key={t.id} taxon={t} />)}
       </div>
@@ -298,17 +406,9 @@ const RelatedAnimals = ({
   );
 };
 
-const Stat = ({
-  icon: Icon,
-  value,
-  label,
-}: {
-  icon: typeof Eye;
-  value: string;
-  label: string;
-}) => (
+const Stat = ({ icon: Icon, value, label }: { icon: typeof Eye; value: string; label: string }) => (
   <div className="flex items-center gap-3 rounded-2xl bg-card p-4 ring-1 ring-border">
-    <span className="flex size-10 items-center justify-center rounded-xl bg-secondary text-moss">
+    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-moss">
       <Icon className="size-5" />
     </span>
     <div>
@@ -316,6 +416,10 @@ const Stat = ({
       <p className="text-xs text-muted-foreground">{label}</p>
     </div>
   </div>
+);
+
+const MapSkeleton = () => (
+  <div className="h-[380px] animate-pulse rounded-3xl bg-muted md:h-[460px]" />
 );
 
 const DetailSkeleton = () => (

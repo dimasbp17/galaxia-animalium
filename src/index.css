@@ -94,3 +94,22 @@
 @utility container-page {
   @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
 }
+
+@keyframes nav-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+/* Leaflet: pakai font situs */
+.leaflet-container {
+  font-family: var(--font-sans);
+}
+
+/* Redam warna peta dasar supaya overlay observasi lebih menonjol */
+.map-basemap {
+  filter: saturate(0.35) brightness(1.05);
+}

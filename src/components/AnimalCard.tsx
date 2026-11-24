@@ -1,5 +1,7 @@
 import { Link } from "react-router-dom";
 import { ImageOff } from "lucide-react";
+import ConservationBadge from "@/components/ConservationBadge";
+import { isNotable } from "@/lib/conservation";
 import { cn } from "@/lib/utils";
 import { photoSize } from "@/services/inaturalist";
 import type { Taxon } from "@/types/animal";
@@ -35,11 +37,19 @@ const AnimalCard = ({ taxon, className }: AnimalCardProps) => {
         )}
       </div>
 
+      {isNotable(taxon.conservation_status) && (
+        <ConservationBadge
+          status={taxon.conservation_status}
+          variant="compact"
+          className="absolute top-3 left-3 shadow-sm"
+        />
+      )}
+
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 via-black/30 to-transparent p-4 pt-12 text-white">
-        <p className="font-display text-lg font-semibold leading-tight capitalize">
+        <p className="font-display text-lg leading-tight font-semibold capitalize">
           {name}
         </p>
-        <p className="mt-0.5 truncate text-sm italic text-white/75">
+        <p className="mt-0.5 truncate text-sm text-white/75 italic">
           {taxon.name}
         </p>
       </div>

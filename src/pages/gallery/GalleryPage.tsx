@@ -1,65 +1,112 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Search, SearchX, X } from "lucide-react";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { Globe, LoaderCircle, MapPin, Search, SearchX, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import AnimalCard, { AnimalCardSkeleton } from "@/components/AnimalCard";
-import { useAsync } from "@/hooks/useAsync";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
+import { useInView } from "@/hooks/useInView";
 import { CATEGORIES, getCategory } from "@/lib/categories";
+import { animalsInfiniteQuery } from "@/lib/queries";
+import { getRegion, INDONESIA } from "@/lib/regions";
 import { cn } from "@/lib/utils";
-import { searchAnimals } from "@/services/inaturalist";
+import type { Taxon } from "@/types/animal";
 
 const PER_PAGE = 24;
-/** iNaturalist membatasi paginasi sampai 10.000 hasil. */
-const MAX_RESULTS = 10000;
+
+/** Parameter URL: ?q=…&kategori=mamalia&wilayah=indonesia&status=terancam */
+interface GalleryParams {
+  q?: string;
+  kategori?: string;
+  wilayah?: string;
+  status?: string;
+}
 
 const GalleryPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const query = searchParams.get("q") ?? "";
-  const category = getCategory(searchParams.get("kategori"));
-  const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
+  const current: GalleryParams = {
+    q: searchParams.get("q") ?? undefined,
+    kategori: searchParams.get("kategori") ?? undefined,
+    wilayah: searchParams.get("wilayah") ?? undefined,
+    status: searchParams.get("status") ?? undefined,
+  };
+  const query = current.q ?? "";
+  const category = getCategory(current.kategori);
+  const region = getRegion(current.wilayah);
+  const threatened = current.status === "terancam";
+
   const [input, setInput] = useState(query);
-
-  useDocumentTitle(category ? `${category.label} — Gallery` : "Gallery");
-
   // Sinkronkan input kalau query berubah dari luar (mis. tombol back)
   useEffect(() => setInput(query), [query]);
 
-  const { data, loading, error } = useAsync(
-    () =>
-      searchAnimals({
-        query,
-        taxonId: category?.taxonId,
-        page,
-        perPage: PER_PAGE,
-      }),
-    [query, category?.taxonId, page]
+  const titleParts = [
+    category?.label ?? (region ? "Satwa" : "Semua Hewan"),
+    region && `di ${region.label}`,
+  ].filter(Boolean);
+  const title = titleParts.join(" ");
+  useDocumentTitle(`${title}${threatened ? " (terancam)" : ""} — Gallery`);
+
+  const filters = useMemo(
+    () => ({
+      query,
+      taxonId: category?.taxonId,
+      placeId: region?.placeId,
+      threatened,
+    }),
+    [query, category?.taxonId, region?.placeId, threatened]
   );
 
-  const totalPages = data
-    ? Math.ceil(Math.min(data.total_results, MAX_RESULTS) / PER_PAGE)
-    : 1;
+  const {
+    data,
+    isPending,
+    isError,
+    error,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+    isFetchNextPageError,
+  } = useInfiniteQuery(animalsInfiniteQuery(filters, PER_PAGE));
 
-  const updateParams = (next: {
-    q?: string;
-    kategori?: string;
-    page?: number;
-  }) => {
+  // Gabungkan semua halaman & buang duplikat (bisa muncul antar halaman)
+  const animals = useMemo(() => {
+    const seen = new Set<number>();
+    const list: Taxon[] = [];
+    for (const page of data?.pages ?? []) {
+      for (const t of page.results) {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          list.push(t);
+        }
+      }
+    }
+    return list;
+  }, [data]);
+  const total = data?.pages[0]?.total_results ?? 0;
+
+  // Infinite scroll: muat halaman berikutnya saat sentinel mendekati viewport
+  const { ref: sentinelRef, inView } = useInView<HTMLDivElement>("600px");
+  useEffect(() => {
+    if (inView && hasNextPage && !isFetchingNextPage && !isFetchNextPageError) {
+      fetchNextPage();
+    }
+  }, [inView, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
+
+  const update = (patch: Partial<GalleryParams>) => {
+    const next = { ...current, ...patch };
     const params: Record<string, string> = {};
-    if (next.q) params.q = next.q;
-    if (next.kategori) params.kategori = next.kategori;
-    if (next.page && next.page > 1) params.page = String(next.page);
+    for (const [k, v] of Object.entries(next)) if (v) params[k] = v;
     setSearchParams(params);
   };
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
-    updateParams({ q: input.trim(), kategori: category?.slug });
-  };
-
-  const goToPage = (p: number) => {
-    updateParams({ q: query, kategori: category?.slug, page: p });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    update({ q: input.trim() || undefined });
   };
 
   return (
@@ -70,13 +117,12 @@ const GalleryPage = () => {
           <p className="text-sm font-semibold tracking-wider text-clay uppercase">
             Gallery
           </p>
-          <h1 className="mt-2 text-4xl font-bold text-forest md:text-5xl">
-            {category ? category.label : "Semua Hewan"}
-          </h1>
+          <h1 className="mt-2 text-4xl font-bold text-forest md:text-5xl">{title}</h1>
           <p className="mt-3 max-w-xl text-muted-foreground">
-            {category
-              ? `${category.description}. Diurutkan dari yang paling sering diamati.`
-              : "Telusuri spesies hewan dari seluruh dunia, diurutkan dari yang paling sering diamati."}
+            {category ? `${category.description}. ` : ""}
+            {region
+              ? `Spesies yang pernah diamati di ${region.label}, diurutkan dari yang paling sering ditemui.`
+              : "Spesies dari seluruh dunia, diurutkan dari yang paling sering diamati."}
           </p>
 
           <form
@@ -95,7 +141,7 @@ const GalleryPage = () => {
                 type="button"
                 onClick={() => {
                   setInput("");
-                  updateParams({ kategori: category?.slug });
+                  update({ q: undefined });
                 }}
                 className="flex size-8 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary"
                 aria-label="Hapus pencarian"
@@ -107,23 +153,54 @@ const GalleryPage = () => {
               Cari
             </Button>
           </form>
+
+          {/* Wilayah & status */}
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-full bg-background p-1 ring-1 ring-border">
+              <SegmentButton
+                active={!region}
+                onClick={() => update({ wilayah: undefined })}
+              >
+                <Globe className="size-4" /> Dunia
+              </SegmentButton>
+              <SegmentButton
+                active={region?.slug === INDONESIA.slug}
+                onClick={() => update({ wilayah: INDONESIA.slug })}
+              >
+                <MapPin className="size-4" /> Indonesia
+              </SegmentButton>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => update({ status: threatened ? undefined : "terancam" })}
+              aria-pressed={threatened}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium ring-1 transition-colors",
+                threatened
+                  ? "bg-orange-100 text-orange-800 ring-orange-300"
+                  : "bg-background text-foreground/70 ring-border hover:text-foreground"
+              )}
+              title="Status IUCN Hampir Terancam, Rentan, Genting, atau Kritis"
+            >
+              <ShieldAlert className="size-4" />
+              Hanya satwa terancam
+            </button>
+          </div>
         </div>
       </section>
 
       {/* ---------- Filter kategori ---------- */}
       <div className="sticky top-16 z-40 border-b border-border/60 bg-background/85 backdrop-blur-lg">
         <div className="container-page flex gap-2 overflow-x-auto py-3 [scrollbar-width:none]">
-          <CategoryChip
-            active={!category}
-            onClick={() => updateParams({ q: query })}
-          >
+          <CategoryChip active={!category} onClick={() => update({ kategori: undefined })}>
             Semua
           </CategoryChip>
           {CATEGORIES.map((c) => (
             <CategoryChip
               key={c.slug}
               active={category?.slug === c.slug}
-              onClick={() => updateParams({ q: query, kategori: c.slug })}
+              onClick={() => update({ kategori: c.slug })}
             >
               <c.icon className="size-4" />
               {c.label}
@@ -134,10 +211,10 @@ const GalleryPage = () => {
 
       {/* ---------- Hasil ---------- */}
       <section className="container-page pt-8">
-        {data && !loading && (
+        {data && (
           <p className="mb-5 text-sm text-muted-foreground">
             <span className="font-semibold text-foreground">
-              {data.total_results.toLocaleString("id-ID")}
+              {total.toLocaleString("id-ID")}
             </span>{" "}
             spesies ditemukan
             {query && (
@@ -149,13 +226,13 @@ const GalleryPage = () => {
           </p>
         )}
 
-        {error && !loading && (
+        {isError && !data && (
           <div className="rounded-2xl bg-destructive/10 p-6 text-destructive">
-            Gagal memuat data: {error}
+            Gagal memuat data: {error.message}
           </div>
         )}
 
-        {loading && (
+        {isPending && (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {Array.from({ length: 12 }).map((_, i) => (
               <AnimalCardSkeleton key={i} />
@@ -163,60 +240,79 @@ const GalleryPage = () => {
           </div>
         )}
 
-        {data && !loading && data.results.length === 0 && (
+        {data && animals.length === 0 && (
           <div className="flex flex-col items-center py-20 text-center">
             <span className="flex size-16 items-center justify-center rounded-full bg-secondary text-moss">
               <SearchX className="size-7" />
             </span>
-            <h2 className="mt-5 text-2xl font-bold text-forest">
-              Tidak ada hasil
-            </h2>
+            <h2 className="mt-5 text-2xl font-bold text-forest">Tidak ada hasil</h2>
             <p className="mt-2 max-w-sm text-muted-foreground">
-              Coba kata kunci lain, gunakan nama ilmiah, atau pilih kategori
-              “Semua”.
+              Coba kata kunci lain, gunakan nama ilmiah, atau longgarkan filter
+              kategori, wilayah, dan status.
             </p>
           </div>
         )}
 
-        {data && !loading && data.results.length > 0 && (
+        {animals.length > 0 && (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {data.results.map((taxon) => (
+            {animals.map((taxon) => (
               <AnimalCard key={taxon.id} taxon={taxon} />
             ))}
+            {isFetchingNextPage &&
+              Array.from({ length: 4 }).map((_, i) => <AnimalCardSkeleton key={`s${i}`} />)}
           </div>
         )}
 
-        {data && !loading && totalPages > 1 && (
-          <div className="mt-12 flex items-center justify-center gap-3">
-            <Button
-              variant="outline"
-              size="icon"
-              disabled={page <= 1}
-              onClick={() => goToPage(page - 1)}
-              aria-label="Halaman sebelumnya"
-            >
-              <ChevronLeft />
-            </Button>
-            <span className="min-w-32 text-center text-sm text-muted-foreground">
-              Halaman{" "}
-              <span className="font-semibold text-foreground">{page}</span> dari{" "}
-              {totalPages.toLocaleString("id-ID")}
-            </span>
-            <Button
-              variant="outline"
-              size="icon"
-              disabled={page >= totalPages}
-              onClick={() => goToPage(page + 1)}
-              aria-label="Halaman berikutnya"
-            >
-              <ChevronRight />
-            </Button>
+        {/* Sentinel infinite scroll — selalu dirender supaya observer menempel */}
+        <div ref={sentinelRef} aria-hidden className="h-px" />
+
+        {data && (
+          <div className="mt-10 flex justify-center">
+            {isFetchNextPageError ? (
+              <Button variant="outline" onClick={() => fetchNextPage()}>
+                Gagal memuat — coba lagi
+              </Button>
+            ) : isFetchingNextPage ? (
+              <LoaderCircle className="size-6 animate-spin text-moss" />
+            ) : hasNextPage ? (
+              <Button variant="outline" onClick={() => fetchNextPage()}>
+                Muat lebih banyak
+              </Button>
+            ) : (
+              animals.length > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  Semua {animals.length.toLocaleString("id-ID")} spesies sudah ditampilkan.
+                </p>
+              )
+            )}
           </div>
         )}
       </section>
     </>
   );
 };
+
+const SegmentButton = ({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-pressed={active}
+    className={cn(
+      "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-medium transition-colors",
+      active ? "bg-primary text-primary-foreground" : "text-foreground/70 hover:text-foreground"
+    )}
+  >
+    {children}
+  </button>
+);
 
 const CategoryChip = ({
   active,
@@ -230,6 +326,7 @@ const CategoryChip = ({
   <button
     type="button"
     onClick={onClick}
+    aria-pressed={active}
     className={cn(
       "inline-flex shrink-0 items-center gap-1.5 rounded-full px-4 py-2 text-sm font-medium transition-colors",
       active

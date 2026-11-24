@@ -1,32 +1,36 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   BookOpen,
   Camera,
   Globe,
+  MapPin,
   Search,
   Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import AnimalCard, { AnimalCardSkeleton } from "@/components/AnimalCard";
 import SectionHeading from "@/components/SectionHeading";
-import { useAsync } from "@/hooks/useAsync";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { CATEGORIES } from "@/lib/categories";
-import { photoSize, searchAnimals } from "@/services/inaturalist";
+import { animalsQuery } from "@/lib/queries";
+import { INDONESIA } from "@/lib/regions";
+import { photoSize } from "@/services/inaturalist";
 
 const LandingPage = () => {
   useDocumentTitle();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
 
-  const { data, loading } = useAsync(
-    () => searchAnimals({ perPage: 11 }),
-    []
-  );
+  const { data, isPending: loading } = useQuery(animalsQuery({}, 11));
   const heroAnimals = data?.results.slice(0, 3) ?? [];
   const featured = data?.results.slice(3, 11) ?? [];
+
+  const { data: threatenedData, isPending: threatenedLoading } = useQuery(
+    animalsQuery({ placeId: INDONESIA.placeId, threatened: true }, 8)
+  );
 
   const onSearch = (e: FormEvent) => {
     e.preventDefault();
@@ -179,6 +183,49 @@ const LandingPage = () => {
               </p>
             </Link>
           ))}
+        </div>
+      </section>
+
+      {/* ---------- Satwa Indonesia terancam ---------- */}
+      <section className="mt-24 bg-forest py-20 text-sand">
+        <div className="container-page">
+          <div className="flex flex-wrap items-end justify-between gap-6">
+            <div className="max-w-2xl">
+              <p className="inline-flex items-center gap-1.5 text-sm font-semibold tracking-wider text-leaf uppercase">
+                <MapPin className="size-4" /> Satwa Indonesia
+              </p>
+              <h2 className="mt-2 text-3xl font-bold md:text-4xl">
+                Mereka butuh perhatian kita
+              </h2>
+              <p className="mt-3 text-sand/70">
+                Spesies yang tercatat di Indonesia dan berstatus terancam
+                menurut Daftar Merah IUCN — dari yang hampir terancam hingga
+                kritis.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Button asChild className="bg-sand text-forest hover:bg-sand/90">
+                <Link to="/gallery?wilayah=indonesia&status=terancam">
+                  Lihat semua <ArrowRight />
+                </Link>
+              </Button>
+              <Button
+                asChild
+                variant="outline"
+                className="border-sand/30 bg-transparent text-sand hover:bg-sand/10 hover:text-sand"
+              >
+                <Link to="/gallery?wilayah=indonesia">Semua satwa Indonesia</Link>
+              </Button>
+            </div>
+          </div>
+
+          <div className="mt-10 grid grid-cols-2 gap-4 md:grid-cols-4">
+            {threatenedLoading
+              ? Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="aspect-[4/5] animate-pulse rounded-2xl bg-sand/10" />
+                ))
+              : threatenedData?.results.map((t) => <AnimalCard key={t.id} taxon={t} />)}
+          </div>
         </div>
       </section>
 
